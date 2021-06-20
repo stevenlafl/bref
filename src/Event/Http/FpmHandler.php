@@ -74,7 +74,13 @@ final class FpmHandler extends HttpHandler
          * --nodaemonize: we want to keep control of the process
          * --force-stderr: force logs to be sent to stderr, which will allow us to send them to CloudWatch
          */
-        $this->fpm = new Process(['php-fpm', '--nodaemonize', '--force-stderr', '--fpm-config', $this->configFile]);
+        
+        if (getenv('IS_LOCAL') == 1) {
+            $this->fpm = new Process(['php-fpm', '-R', '--nodaemonize', '--force-stderr', '--fpm-config', $this->configFile]);
+        }
+        else {
+            $this->fpm = new Process(['php-fpm', '--nodaemonize', '--force-stderr', '--fpm-config', $this->configFile]);
+        }
 
         $this->fpm->setTimeout(null);
         $this->fpm->start(function ($type, $output): void {
