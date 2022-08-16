@@ -3,7 +3,7 @@
 namespace Bref\Test\Handler;
 
 use Bref\Context\Context;
-use Bref\Event\Http\FastCgi\FastCgiCommunicationFailed;
+use Bref\Event\Http\FastCgi\Timeout;
 use Bref\Event\Http\FpmHandler;
 use Bref\Test\HttpRequestProxyTest;
 use DMS\PHPUnitExtensions\ArraySubset\ArraySubsetAsserts;
@@ -732,7 +732,8 @@ Year,Make,Model
             ],
             'body' => $body,
         ];
-        $this->assertGlobalVariables($event, [
+
+        $expectedGlobalVariables = [
             '$_GET' => [],
             '$_POST' => [],
             '$_FILES' => [
@@ -742,6 +743,7 @@ Year,Make,Model
                     'error' => 0,
                     'size' => 57,
                     'content' => "Lorem ipsum dolor sit amet,\nconsectetur adipiscing elit.\n",
+                    'full_path' => 'lorem.txt',
                 ],
                 'bar' => [
                     'name' => 'cars.csv',
@@ -749,6 +751,7 @@ Year,Make,Model
                     'error' => 0,
                     'size' => 51,
                     'content' => "Year,Make,Model\n1997,Ford,E350\n2000,Mercury,Cougar\n",
+                    'full_path' => 'cars.csv',
                 ],
             ],
             '$_COOKIE' => [],
@@ -767,7 +770,15 @@ Year,Make,Model
                 'LAMBDA_REQUEST_CONTEXT' => '[]',
             ],
             'HTTP_RAW_BODY' => '',
-        ]);
+        ];
+
+        if (\PHP_VERSION_ID < 80100) {
+            // full_path was introduced in PHP 8.1, remove it for lower versions
+            unset($expectedGlobalVariables['$_FILES']['foo']['full_path']);
+            unset($expectedGlobalVariables['$_FILES']['bar']['full_path']);
+        }
+
+        $this->assertGlobalVariables($event, $expectedGlobalVariables);
     }
 
     /**
@@ -1060,7 +1071,7 @@ Year,Make,Model
                 'httpMethod' => 'GET',
             ], $this->fakeContext);
             $this->fail('No exception was thrown');
-        } catch (FastCgiCommunicationFailed $e) {
+        } catch (Timeout $e) {
             // PHP-FPM should work after that
             $statusCode = $this->fpm->handle([
                 'version' => '1.0',
@@ -1070,6 +1081,26 @@ Year,Make,Model
                 ],
             ], $this->fakeContext)['statusCode'];
             self::assertEquals(200, $statusCode);
+        }
+    }
+
+    /**
+     * See https://github.com/brefphp/bref/issues/862
+     */
+    public function test worker logs are still written in case of a timeout()
+    {
+        $this->fpm = new FpmHandler(__DIR__ . '/PhpFpm/timeout.php', __DIR__ . '/PhpFpm/php-fpm.conf');
+        $this->fpm->start();
+
+        try {
+            $this->fpm->handle([
+                'version' => '1.0',
+                'httpMethod' => 'GET',
+            ], new Context('abc', time(), 'abc', 'abc'));
+            $this->fail('No exception was thrown');
+        } catch (Timeout $e) {
+            $logs = ob_get_contents();
+            self::assertStringContainsString('This is a log message', $logs);
         }
     }
 

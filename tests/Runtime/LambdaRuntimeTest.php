@@ -35,7 +35,7 @@ class LambdaRuntimeTest extends TestCase
     {
         ob_start();
         Server::start();
-        $this->runtime = new LambdaRuntime('localhost:8126');
+        $this->runtime = new LambdaRuntime('localhost:8126', 'phpunit');
     }
 
     protected function tearDown(): void
@@ -48,10 +48,11 @@ class LambdaRuntimeTest extends TestCase
     {
         $this->givenAnEvent(['Hello' => 'world!']);
 
-        $this->runtime->processNextEvent(function () {
+        $output = $this->runtime->processNextEvent(function () {
             return ['hello' => 'world'];
         });
 
+        $this->assertTrue($output);
         $this->assertInvocationResult(['hello' => 'world']);
     }
 
@@ -73,10 +74,11 @@ class LambdaRuntimeTest extends TestCase
     {
         $this->givenAnEvent(['Hello' => 'world!']);
 
-        $this->runtime->processNextEvent(function () {
+        $output = $this->runtime->processNextEvent(function () {
             throw new \RuntimeException('This is an exception');
         });
 
+        $this->assertFalse($output);
         $this->assertInvocationErrorResult('RuntimeException', 'This is an exception');
         $this->assertErrorInLogs('RuntimeException', 'This is an exception');
     }
@@ -190,7 +192,7 @@ class LambdaRuntimeTest extends TestCase
 
         $message = <<<ERROR
 The Lambda response cannot be encoded to JSON.
-This error usually happens when you try to return binary content. If you are writing an HTTP application and you want to return a binary HTTP response (like an image, a PDF, etc.), please read this guide: https://bref.sh/docs/runtimes/http.html#binary-responses
+This error usually happens when you try to return binary content. If you are writing an HTTP application and you want to return a binary HTTP response (like an image, a PDF, etc.), please read this guide: https://bref.sh/docs/runtimes/http.html#binary-requests-and-responses
 Here is the original JSON error: 'Malformed UTF-8 characters, possibly incorrectly encoded'
 ERROR;
         $this->assertInvocationErrorResult('Exception', $message);

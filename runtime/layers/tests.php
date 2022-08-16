@@ -10,12 +10,18 @@ $allLayers = [
     'bref/php-73',
     'bref/php-74',
     'bref/php-80',
+    'bref/php-81',
+    'bref/php-82',
     'bref/php-73-fpm',
     'bref/php-74-fpm',
     'bref/php-80-fpm',
+    'bref/php-81-fpm',
+    'bref/php-82-fpm',
     'bref/php-73-fpm-dev',
     'bref/php-74-fpm-dev',
     'bref/php-80-fpm-dev',
+    'bref/php-81-fpm-dev',
+    // 'bref/php-82-fpm-dev',
 ];
 foreach ($allLayers as $layer) {
     // Working directory
@@ -29,8 +35,8 @@ foreach ($allLayers as $layer) {
     echo '.';
 
     // Test extensions load correctly
-    // Skip this for PHP 8.0 until all extensions are supported
-    if (strpos($layer, 'php-80') === false) {
+    // Skip this for PHP 8.0, 8.1, and 8.2 until all extensions are supported
+    if (strpos($layer, 'php-8') === false) {
         exec("docker run --rm -v \${PWD}/helpers:/var/task/ --entrypoint /var/task/extensions-test.sh $layer", $output, $exitCode);
         if ($exitCode !== 0) {
             throw new Exception(implode(PHP_EOL, $output), $exitCode);
@@ -44,9 +50,13 @@ $fpmLayers = [
     'bref/php-73-fpm',
     'bref/php-74-fpm',
     'bref/php-80-fpm',
+    'bref/php-81-fpm',
+    'bref/php-82-fpm', 
     'bref/php-73-fpm-dev',
     'bref/php-74-fpm-dev',
     'bref/php-80-fpm-dev',
+    'bref/php-81-fpm-dev',
+    // 'bref/php-82-fpm-dev', 
 ];
 foreach ($fpmLayers as $layer) {
     // PHP-FPM is installed
@@ -60,6 +70,8 @@ $devLayers = [
     'bref/php-73-fpm-dev',
     'bref/php-74-fpm-dev',
     'bref/php-80-fpm-dev',
+    'bref/php-81-fpm-dev',
+    // 'bref/php-82-fpm-dev',
 ];
 $devExtensions = [
     'xdebug',

@@ -1,5 +1,11 @@
 .EXPORT_ALL_VARIABLES:
 
+trigger_runtimes:
+	aws codepipeline start-pipeline-execution --name bref-php-binary
+
+runtime_build_status:
+	aws codepipeline get-pipeline-state --name=bref-php-binary | jq ".stageStates[1].latestExecution.status"
+
 # Build the PHP runtimes
 runtimes:
 	cd runtime ; make publish
@@ -18,9 +24,13 @@ publish-docker-images: docker-images
 	  "bref/php-73" "bref/php-73-fpm" "bref/php-73-console" "bref/php-73-fpm-dev" \
 	  "bref/php-74" "bref/php-74-fpm" "bref/php-74-console" "bref/php-74-fpm-dev" \
 	  "bref/php-80" "bref/php-80-fpm" "bref/php-80-console" "bref/php-80-fpm-dev" \
+	  "bref/php-81" "bref/php-81-fpm" "bref/php-81-console" "bref/php-81-fpm-dev" \
+	  "bref/php-82" "bref/php-82-fpm" "bref/php-82-console" \
 	  "bref/build-php-73" \
 	  "bref/build-php-74" \
 	  "bref/build-php-80" \
+	  "bref/build-php-81" \
+	  "bref/build-php-82" \
 	  "bref/fpm-dev-gateway"; \
 	do \
 		docker image tag $$image:latest $$image:${DOCKER_TAG} ; \
@@ -64,5 +74,8 @@ amazonlinux-package-list:
 	docker run --rm -it --entrypoint= public.ecr.aws/lambda/provided:al2 yum list --quiet --color=never > index.html
 	aws s3 cp index.html s3://amazon-linux-2-packages.bref.sh/ --content-type=text/plain
 	rm index.html
+
+getcomposer:
+	./runtime/helpers/install-composer.sh
 
 .PHONY: runtimes website website-preview website-assets demo layers.json test-stack changelog

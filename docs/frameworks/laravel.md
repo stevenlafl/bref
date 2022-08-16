@@ -15,10 +15,10 @@ First, make sure you have followed the [Installation guide](../installation.md) 
 Next, in an existing Laravel project, install Bref and the [Laravel-Bref package](https://github.com/brefphp/laravel-bridge).
 
 ```
-composer require bref/bref bref/laravel-bridge
+composer require bref/bref bref/laravel-bridge --update-with-dependencies
 ```
 
-Then let's create a `serverless.yml` configuration file:
+Then let's create a [`serverless.yml` configuration file](https://github.com/brefphp/laravel-bridge/blob/master/config/serverless.yml):
 
 ```
 php artisan vendor:publish --tag=serverless-config
@@ -67,12 +67,49 @@ Follow [the deployment guide](/docs/deploy.md#deploying-for-production) for more
 
 In case your application is showing a blank page after being deployed, [have a look at the logs](../environment/logs.md).
 
+## Trusted proxies
+
+Because Laravel is executed through API Gateway, the `Host` header is set to the API Gateway host name. Helper functions such as `redirect()` will use this incorrect domain name. The correct domain name is set on the `X-Forwarded-Host` header.
+
+To get Laravel to use `X-Forwarded-Host` instead, edit the `App\Http\Middleware\TrustProxies` middleware and set `$proxies` to the `*` wildcard:
+
+```php
+class TrustProxies extends Middleware
+{
+    // ...
+    protected $proxies = '*';
+```
+
+Read more [in the official Laravel documentation](https://laravel.com/docs/8.x/requests#configuring-trusted-proxies).
+
 ## Caching
 
 By default, the Bref bridge will move Laravel's cache directory to `/tmp` to avoid issues with the default cache directory that is read-only.
 
 The `/tmp` directory isn't shared across Lambda instances: while this works, this isn't the ideal solution for production workloads.
 If you plan on actively using the cache, or anything that uses it (like API rate limiting), you should instead use Redis or DynamoDB.
+
+### Using DynamoDB
+
+To use DynamoDB as a cache store, change this configuration in `config/cache.php`
+
+```diff
+  # config/cache.php
+  'dynamodb' => [
+      'driver' => 'dynamodb',
+      'key' => env('AWS_ACCESS_KEY_ID'),
+      'secret' => env('AWS_SECRET_ACCESS_KEY'),
+      'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
+      'table' => env('DYNAMODB_CACHE_TABLE', 'cache'),
+      'endpoint' => env('DYNAMODB_ENDPOINT'),
++     'attributes' => [
++         'key' => 'id',
++         'expiration' => 'ttl',
++     ]  
+  ],
+```
+
+Then follow [this section of the documentation](/docs/environment/storage.md#deploying-dynamodb-tables) to deploy your DynamoDB table using the Serverless Framework.
 
 ## Laravel Artisan
 
@@ -88,20 +125,74 @@ For more details follow [the "Console" guide](/docs/runtimes/console.md).
 
 ## Assets
 
-To deploy Laravel websites, we need assets to be served by AWS S3. Setting up the S3 bucket is already explained in the [websites documentation](../websites.md#hosting-static-files-with-s3). This section provides additional instructions specific to Laravel Mix.
+To deploy Laravel websites, assets need to be served from AWS S3. The easiest approach is to use the
+<a href="https://github.com/getlift/lift/blob/master/docs/server-side-website.md">Server-side website construct of the Lift plugin</a>.
 
-First, you can compile assets for production in the `public` directory, then synchronize that directory to a S3 bucket:
+This will deploy a Cloudfront distribution that will act as a proxy: it will serve
+static files directly from S3 and will forward everything else to Lambda. This is very close
+to how traditional web servers like Apache or Nginx work, which means your application doesn't need to change!
+For more details, see <a href="https://github.com/getlift/lift/blob/master/docs/server-side-website.md#how-it-works">the official documentation</a>.
+
+First install the plugin
+
+```bash
+serverless plugin install -n serverless-lift
+```
+
+Then add this configuration to your `serverless.yml` file.
+
+```yaml
+...
+service: laravel
+
+provider:
+  ...
+
+plugins:
+  - ./vendor/bref/bref
+  - serverless-lift
+    
+functions:
+  ...
+
+constructs:
+  website:
+    type: server-side-website
+    assets:
+      '/js/*': public/js
+      '/css/*': public/css
+      '/favicon.ico': public/favicon.ico
+      '/robots.txt': public/robots.txt
+      # add here any file or directory that needs to be served from S3
+    # Laravel uses some headers that are not in CloudFront's default whitelist.
+    # To add any, we need to list all accepted headers to pass through.
+    # https://github.com/getlift/lift/blob/master/docs/server-side-website.md#forwarded-headers
+    forwardedHeaders:
+      - Accept
+      - Accept-Language
+      - Content-Type
+      - Origin
+      - Referer
+      - User-Agent
+      - X-Forwarded-Host
+      - X-Requested-With
+      # Laravel Framework Headers
+      - X-Csrf-Token
+      # Other Headers, e.g. Livewire
+      - X-Livewire
+```
+
+Before deploying, compile your assets using Laravel Mix.
 
 ```bash
 npm run prod
-aws s3 sync public/ s3://<bucket-name>/ --delete --exclude index.php
 ```
 
-Then, the assets need to be included from S3. In the production `.env` file you can now set that variable:
+Now deploy your website using `serverless deploy`. Lift will create all required resources and take care of
+uploading your assets to S3 automatically.
 
-```dotenv
-MIX_ASSET_URL=https://<bucket-name>.s3.amazonaws.com
-```
+For more details, see the [Websites section](/docs/websites.md) of this documentation
+and the official <a href="https://github.com/getlift/lift/blob/master/docs/server-side-website.md">Lift documentation</a>.
 
 ### Assets in templates
 
@@ -137,13 +228,15 @@ provider:
     environment:
         # environment variable for Laravel
         AWS_BUCKET: !Ref Storage
-    iamRoleStatements:
-        # Allow Lambda to read and write files in the S3 buckets
-        -   Effect: Allow
-            Action: s3:*
-            Resource:
-                - !Sub '${Storage.Arn}' # the storage bucket
-                - !Sub '${Storage.Arn}/*' # and everything inside
+    iam:
+        role:
+            statements:
+                # Allow Lambda to read and write files in the S3 buckets
+                -   Effect: Allow
+                    Action: s3:*
+                    Resource:
+                        - !Sub '${Storage.Arn}' # the storage bucket
+                        - !Sub '${Storage.Arn}/*' # and everything inside
 
 resources:
     Resources:
@@ -260,11 +353,13 @@ Instead, here is what you need to do:
 
     ```yaml
       package:
-          exclude:
-              ...
-          include:
-              - storage/oauth-private.key
-              - storage/oauth-public.key
+          patterns:
+              - ...
+              # Exclude the 'storage' directory
+              - '!storage/**'
+              # Except the public and private keys required by Laravel Passport
+              - 'storage/oauth-private.key'
+              - 'storage/oauth-public.key'
       ```
 
 - You can now deploy the application:

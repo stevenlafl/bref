@@ -30,11 +30,11 @@ use Psr\Http\Server\RequestHandlerInterface;
  */
 final class LambdaRuntime
 {
-    /** @var resource|null */
-    private $handler;
+    /** @var resource|\CurlHandle|null */
+    private $curlHandleNext;
 
-    /** @var resource|null */
-    private $returnHandler;
+    /** @var resource|\CurlHandle|null */
+    private $curlHandleResult;
 
     /** @var string */
     private $apiUrl;
@@ -42,12 +42,15 @@ final class LambdaRuntime
     /** @var Invoker */
     private $invoker;
 
-    public static function fromEnvironmentVariable(): self
+    /** @var string */
+    private $layer;
+
+    public static function fromEnvironmentVariable(string $layer): self
     {
-        return new self((string) getenv('AWS_LAMBDA_RUNTIME_API'));
+        return new self((string) getenv('AWS_LAMBDA_RUNTIME_API'), $layer);
     }
 
-    public function __construct(string $apiUrl)
+    public function __construct(string $apiUrl, string $layer)
     {
         if ($apiUrl === '') {
             die('At the moment lambdas can only be executed in an Lambda environment');
@@ -55,28 +58,13 @@ final class LambdaRuntime
 
         $this->apiUrl = $apiUrl;
         $this->invoker = new Invoker;
+        $this->layer = $layer;
     }
 
     public function __destruct()
     {
-        $this->closeHandler();
-        $this->closeReturnHandler();
-    }
-
-    private function closeHandler(): void
-    {
-        if ($this->handler !== null) {
-            curl_close($this->handler);
-            $this->handler = null;
-        }
-    }
-
-    private function closeReturnHandler(): void
-    {
-        if ($this->returnHandler !== null) {
-            curl_close($this->returnHandler);
-            $this->returnHandler = null;
-        }
+        $this->closeCurlHandleNext();
+        $this->closeCurlHandleResult();
     }
 
     /**
@@ -89,9 +77,10 @@ final class LambdaRuntime
      *     $lambdaRuntime->processNextEvent(function ($event, Context $context) {
      *         return 'Hello ' . $event['name'] . '. We have ' . $context->getRemainingTimeInMillis()/1000 . ' seconds left';
      *     });
+     * @return bool true if event was successfully handled
      * @throws Exception
      */
-    public function processNextEvent($handler): void
+    public function processNextEvent($handler): bool
     {
         [$event, $context] = $this->waitNextInvocation();
         \assert($context instanceof Context);
@@ -104,7 +93,11 @@ final class LambdaRuntime
             $this->sendResponse($context->getAwsRequestId(), $result);
         } catch (\Throwable $e) {
             $this->signalFailure($context->getAwsRequestId(), $e);
+
+            return false;
         }
+
+        return true;
     }
 
     /**
@@ -116,15 +109,18 @@ final class LambdaRuntime
      */
     private function waitNextInvocation(): array
     {
-        if ($this->handler === null) {
-            $this->handler = curl_init("http://{$this->apiUrl}/2018-06-01/runtime/invocation/next");
-            curl_setopt($this->handler, CURLOPT_FOLLOWLOCATION, true);
-            curl_setopt($this->handler, CURLOPT_FAILONERROR, true);
+        if ($this->curlHandleNext === null) {
+            $this->curlHandleNext = curl_init("http://{$this->apiUrl}/2018-06-01/runtime/invocation/next");
+            curl_setopt($this->curlHandleNext, CURLOPT_FOLLOWLOCATION, true);
+            curl_setopt($this->curlHandleNext, CURLOPT_FAILONERROR, true);
+            // Set a custom user agent so that AWS can estimate Bref usage in custom runtimes
+            $phpVersion = substr(PHP_VERSION, 0, strpos(PHP_VERSION, '.', 2));
+            curl_setopt($this->curlHandleNext, CURLOPT_USERAGENT, "bref/{$this->layer}/$phpVersion");
         }
 
         // Retrieve invocation ID
         $contextBuilder = new ContextBuilder;
-        curl_setopt($this->handler, CURLOPT_HEADERFUNCTION, function ($ch, $header) use ($contextBuilder) {
+        curl_setopt($this->curlHandleNext, CURLOPT_HEADERFUNCTION, function ($ch, $header) use ($contextBuilder) {
             if (! preg_match('/:\s*/', $header)) {
                 return strlen($header);
             }
@@ -149,16 +145,16 @@ final class LambdaRuntime
 
         // Retrieve body
         $body = '';
-        curl_setopt($this->handler, CURLOPT_WRITEFUNCTION, function ($ch, $chunk) use (&$body) {
+        curl_setopt($this->curlHandleNext, CURLOPT_WRITEFUNCTION, function ($ch, $chunk) use (&$body) {
             $body .= $chunk;
 
             return strlen($chunk);
         });
 
-        curl_exec($this->handler);
-        if (curl_errno($this->handler) > 0) {
-            $message = curl_error($this->handler);
-            $this->closeHandler();
+        curl_exec($this->curlHandleNext);
+        if (curl_errno($this->curlHandleNext) > 0) {
+            $message = curl_error($this->curlHandleNext);
+            $this->closeCurlHandleNext();
             throw new Exception('Failed to fetch next Lambda invocation: ' . $message);
         }
         if ($body === '') {
@@ -270,29 +266,45 @@ final class LambdaRuntime
         $jsonData = json_encode($data);
         if ($jsonData === false) {
             throw new Exception(sprintf(
-                "The Lambda response cannot be encoded to JSON.\nThis error usually happens when you try to return binary content. If you are writing an HTTP application and you want to return a binary HTTP response (like an image, a PDF, etc.), please read this guide: https://bref.sh/docs/runtimes/http.html#binary-responses\nHere is the original JSON error: '%s'",
+                "The Lambda response cannot be encoded to JSON.\nThis error usually happens when you try to return binary content. If you are writing an HTTP application and you want to return a binary HTTP response (like an image, a PDF, etc.), please read this guide: https://bref.sh/docs/runtimes/http.html#binary-requests-and-responses\nHere is the original JSON error: '%s'",
                 json_last_error_msg()
             ));
         }
 
-        if ($this->returnHandler === null) {
-            $this->returnHandler = curl_init();
-            curl_setopt($this->returnHandler, CURLOPT_CUSTOMREQUEST, 'POST');
-            curl_setopt($this->returnHandler, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($this->returnHandler, CURLOPT_FAILONERROR, true);
+        if ($this->curlHandleResult === null) {
+            $this->curlHandleResult = curl_init();
+            curl_setopt($this->curlHandleResult, CURLOPT_CUSTOMREQUEST, 'POST');
+            curl_setopt($this->curlHandleResult, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($this->curlHandleResult, CURLOPT_FAILONERROR, true);
         }
 
-        curl_setopt($this->returnHandler, CURLOPT_URL, $url);
-        curl_setopt($this->returnHandler, CURLOPT_POSTFIELDS, $jsonData);
-        curl_setopt($this->returnHandler, CURLOPT_HTTPHEADER, [
+        curl_setopt($this->curlHandleResult, CURLOPT_URL, $url);
+        curl_setopt($this->curlHandleResult, CURLOPT_POSTFIELDS, $jsonData);
+        curl_setopt($this->curlHandleResult, CURLOPT_HTTPHEADER, [
             'Content-Type: application/json',
             'Content-Length: ' . strlen($jsonData),
         ]);
-        curl_exec($this->returnHandler);
-        if (curl_errno($this->returnHandler) > 0) {
-            $errorMessage = curl_error($this->returnHandler);
-            $this->closeReturnHandler();
+        curl_exec($this->curlHandleResult);
+        if (curl_errno($this->curlHandleResult) > 0) {
+            $errorMessage = curl_error($this->curlHandleResult);
+            $this->closeCurlHandleResult();
             throw new Exception('Error while calling the Lambda runtime API: ' . $errorMessage);
+        }
+    }
+
+    private function closeCurlHandleNext(): void
+    {
+        if ($this->curlHandleNext !== null) {
+            curl_close($this->curlHandleNext);
+            $this->curlHandleNext = null;
+        }
+    }
+
+    private function closeCurlHandleResult(): void
+    {
+        if ($this->curlHandleResult !== null) {
+            curl_close($this->curlHandleResult);
+            $this->curlHandleResult = null;
         }
     }
 
@@ -308,7 +320,7 @@ final class LambdaRuntime
      * WHAT?
      * The data sent in the ping is anonymous.
      * It does not contain any identifiable data about anything (the project, users, etc.).
-     * The only data it contains is: "A Bref invocation happened".
+     * The only data it contains is: "A Bref invocation happened using a specific layer".
      * You can verify that by checking the content of the message in the function.
      *
      * HOW?
@@ -349,7 +361,7 @@ final class LambdaRuntime
 
         /**
          * Here is the content sent to the Bref analytics server.
-         * It signals an invocation happened.
+         * It signals an invocation happened on which layer.
          * Nothing else is sent.
          *
          * `Invocations_100` is used to signal that this is 1 ping equals 100 invocations.
@@ -360,7 +372,7 @@ final class LambdaRuntime
          *
          * See https://github.com/statsd/statsd/blob/master/docs/metric_types.md for more information.
          */
-        $message = 'Invocations_100:1|c';
+        $message = "Invocations_100:1|c\nLayer_{$this->layer}_100:1|c";
 
         $sock = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
         // This IP address is the Bref server.

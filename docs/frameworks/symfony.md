@@ -122,8 +122,8 @@ framework:
 ```
 
 Note that API Gateway doesn't set the `X-Forwarded-Host` header, so we don't trust it by default. You should only whitelist this header if you set it manually,
-for example in your CloudFront configuration (see how to do it in
-the [example Cloudformation template](../websites.md#serving-php-and-static-files-via-cloudfront)).
+for example in your CloudFront configuration (this is done automatically
+in [the Cloudfront distribution deployed by Lift](#assets)).
 
 > Be careful with these settings if your app will not be executed only in a Lambda environment.
 
@@ -138,59 +138,72 @@ in `trusted_proxies`.
 
 ## Assets
 
-To deploy Symfony websites, assets needs to be served by AWS S3. Setting up the S3 bucket is already explained in
-the [websites documentation](../websites.md#hosting-static-files-with-s3). This section provides additional instructions specific to Symfony assets and Webpack
-Encore.
+To deploy Symfony websites, assets need to be served from AWS S3. The easiest approach is to use the
+<a href="https://github.com/getlift/lift/blob/master/docs/server-side-website.md">Server-side website construct of the Lift plugin</a>.
 
-First, you need to [tell Symfony](https://symfony.com/doc/current/reference/configuration/framework.html#base-urls) to use the S3 URL as the assets base URL,
-instead of your app domain in production.
+This will deploy a Cloudfront distribution that will act as a proxy: it will serve
+static files directly from S3 and will forward everything else to Lambda. This is very close
+to how traditional web servers like Apache or Nginx work, which means your application doesn't need to change!
+For more details, see <a href="https://github.com/getlift/lift/blob/master/docs/server-side-website.md#how-it-works">the official documentation</a>. 
+
+First install the plugin
+
+```bash
+serverless plugin install -n serverless-lift
+```
+
+Then add this configuration to your `serverless.yml` file.
 
 ```yaml
-# config/packages/prod/assets.yaml
+...
+service: symfony
 
-framework:
-  assets:
-    base_urls: 'https://<bucket-name>.s3.amazonaws.com'
+provider:
+  ...
+
+plugins:
+  - ./vendor/bref/bref
+  - serverless-lift
+    
+functions:
+  ...
+
+constructs:
+  website:
+    type: server-side-website
+    assets:
+      '/bundles/*': public/bundles
+      '/build/*': public/build
+      '/favicon.ico': public/favicon.ico
+      '/robots.txt': public/robots.txt
+      # add here any file or directory that needs to be served from S3
 ```
 
-If using Webpack Encore, you also need to add the following config at the end of `webpack.config.js`
+Because this construct sets the `X-Forwarded-Host` header by default, you should add it in your `trusted_headers` config, otherwise Symfony
+might generate wrong URLs.
 
-```js
-// webpack.config.js
+```diff
+# config/packages/framework.yaml
 
-if (Encore.isProduction()) {
-    // Note the '/build' at the end of the URL
-    Encore.setPublicPath('https://<bucket-name>.s3.amazonaws.com/build');
-    Encore.setManifestKeyPrefix('build/')
-}
+-   trusted_headers: [ 'x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-port' ]
++   trusted_headers: [ 'x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-port', 'x-forwarded-host' ]
 ```
 
-Then, you can compile assets for production in the `public` directory, and synchronize that directory to a S3 bucket:
+Then, you can compile assets for production in the `public` directory
 
 ```bash
 php bin/console assets:install --env prod
 # if using Webpack Encore, additionally run
 yarn encore production
-aws s3 sync public/ s3://<bucket-name>/ \
-  --delete \
-  --exclude index.php \
-  --exclude public/build/manifest.json \
-  --exclude public/build/entrypoint.json
 ```
 
-Finally, you need to update the `serverless.yml` file to exclude the `assets`, `public/build` and `public/bundles` directories from deployment:
+Now run `serverless deploy`, Lift will automatically create the S3 bucket, a Cloudfront distribution and
+upload all specified files and directories to the bucket.
 
-```yaml
-# serverless.yml
+> If you are not using Flex, update the `serverless.yml` file to exclude assets from the deployment ([see the recipe](https://github.com/symfony/recipes-contrib/blob/master/bref/symfony-bridge/0.1/serverless.yaml#L35))
 
-package:
-  patterns:
-    - '!assets/**'
-    - '!public/build/**'
-    - '!public/bundles/**'
-    - 'public/build/manifest.json'
-    - 'public/build/entrypoint.json'
-```
+For more details, see the [Websites section](/docs/websites.md) of this documentation 
+and the official <a href="https://github.com/getlift/lift/blob/master/docs/server-side-website.md">Lift documentation</a>.
 
 ### Assets in templates
 
@@ -211,4 +224,16 @@ A dedicated Bref package is available for this: [bref/symfony-messenger](https:/
 
 As mentioned above the filesystem is readonly, so if you need a persistent cache it must be stored somewhere else (such as Redis, an RDBMS, or DynamoDB).
 
-A Symfony bundle is available for using AWS DynamoDB as cache backend system: [rikudou/psr6-dynamo-db-bundle](https://github.com/RikudouSage/DynamoDbCachePsr6Bundle)
+### Using DynamoDB for cache
+
+A Symfony bundle is available to use AWS DynamoDB as cache store: [rikudou/psr6-dynamo-db-bundle](https://github.com/RikudouSage/DynamoDbCachePsr6Bundle)
+
+First install the bundle
+
+```bash
+composer require rikudou/psr6-dynamo-db-bundle
+```
+
+Thanks to Symfony Flex, the bundle comes pre-configured to run in Lambda. 
+
+Now, you can follow [this section of the documentation](/docs/environment/storage.md#deploying-dynamodb-tables) to deploy your DynamoDB table using the Serverless Framework.
